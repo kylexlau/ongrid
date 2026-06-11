@@ -133,12 +133,30 @@ docker-ongrid-edge: ## 构建 ongrid-edge 镜像
 # compose
 # ----------------------------------------------------------------------------
 
-.PHONY: compose-up compose-down
-compose-up: ## 本地 docker compose 启动
+.PHONY: compose-up compose-down _compose-certs
+compose-up: _compose-certs ## 本地 docker compose 启动
 	docker compose -f deploy/docker-compose.yml up -d
 
 compose-down: ## 本地 docker compose 停止
 	docker compose -f deploy/docker-compose.yml down
+
+_compose-certs:
+	@mkdir -p deploy/certs
+	@if [ ! -f deploy/certs/tls.crt ] || [ ! -f deploy/certs/tls.key ]; then \
+		command -v openssl >/dev/null 2>&1 || { \
+			echo "错误：缺少 openssl，无法生成本地 TLS 证书" >&2; \
+			exit 1; \
+		}; \
+		echo "生成本地自签 TLS 证书（365 天，CN=ongrid）"; \
+		openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+			-subj "/CN=ongrid" \
+			-keyout deploy/certs/tls.key \
+			-out deploy/certs/tls.crt \
+			-addext "subjectAltName = DNS:ongrid,DNS:localhost,IP:127.0.0.1" \
+			2>/dev/null; \
+		chmod 600 deploy/certs/tls.key; \
+		chmod 644 deploy/certs/tls.crt; \
+	fi
 
 # ----------------------------------------------------------------------------
 # run
