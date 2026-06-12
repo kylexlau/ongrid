@@ -34,6 +34,11 @@ const (
 	// the configs changed. Body is empty; edge re-fetches via
 	// MethodGetPluginConfigs. (real-time push.)
 	MethodPluginConfigsChanged = "plugin_configs_changed"
+	// MethodWriteDatabaseMetricsSecret is manager → edge: write a
+	// databasemetrics credential file on the edge host. The manager sends
+	// this only during a user-initiated save; the normal plugin config
+	// snapshot still carries only non-secret metadata.
+	MethodWriteDatabaseMetricsSecret = "write_database_metrics_secret"
 
 	// WebSSH (manager → edge): edge agent acts as an SSH client into
 	// the host's local sshd. Each browser session is identified by a
@@ -161,6 +166,30 @@ type GetPluginConfigsEntry struct {
 	Spec     map[string]interface{} `json:"spec,omitempty"`
 }
 
+// WriteDatabaseMetricsSecretRequest carries one edge-local credential file.
+// Content is secret material; do not log it and do not persist it on the
+// manager side.
+type WriteDatabaseMetricsSecretRequest struct {
+	SourceID         string                 `json:"source_id"`
+	Path             string                 `json:"path"`
+	Content          string                 `json:"content,omitempty"`
+	DBType           string                 `json:"db_type,omitempty"`
+	Credentials      map[string]interface{} `json:"credentials,omitempty"`
+	PreservePassword bool                   `json:"preserve_password,omitempty"`
+}
+
+// WriteDatabaseMetricsSecretsRequest batches edge-local credential writes so
+// the edge can stage every secret before replacing any existing file.
+type WriteDatabaseMetricsSecretsRequest struct {
+	Secrets []WriteDatabaseMetricsSecretRequest `json:"secrets"`
+}
+
+// WriteDatabaseMetricsSecretResponse acknowledges that the edge wrote the
+// requested credential file.
+type WriteDatabaseMetricsSecretResponse struct {
+	OK bool `json:"ok"`
+}
+
 // ExecuteSkillRequest is the cloud->edge skill invocation envelope.
 // Key identifies the skill in the registry; Params is the JSON-encoded
 // param object that the skill's Executor decodes.
@@ -196,6 +225,17 @@ type HostInfo struct {
 	CPUCount      int    `json:"cpu_count"`
 	MemTotalBytes uint64 `json:"mem_total_bytes"`
 	Fingerprint   string `json:"fingerprint,omitempty"`
+
+	// HardwareFingerprint is a clone-resistant hardware identity computed
+	// edge-side from physical-NIC MACs + CPU model + disk serials (see
+	// internal/edgeagent/collector hardwareFingerprint). Unlike Fingerprint
+	// (gopsutil HostID), it does NOT collapse cloned Linux VMs, which share a
+	// single SMBIOS product_uuid (issue #96): a hypervisor regenerates the NIC
+	// MAC per clone. The cloud prefers this when non-empty and falls back to
+	// Fingerprint otherwise (older agents / hosts with no physical NIC). Both
+	// fields are sent together so the cloud can migrate a device from its old
+	// HostID-derived fingerprint to this one in place. Empty is allowed.
+	HardwareFingerprint string `json:"hardware_fingerprint,omitempty"`
 }
 
 // RegisterEdgeRequest is the first RPC the edge sends after connecting.
@@ -234,13 +274,28 @@ type HeartbeatRequest struct {
 // start (e.g. "subprocess binary missing") — that string is the whole point
 // of this field: it turns a silent failure into an operator-visible reason.
 type PluginHealthWire struct {
-	Name         string `json:"name"`
-	State        string `json:"state"`
-	LastError    string `json:"last_error,omitempty"`
-	RestartCount int    `json:"restart_count,omitempty"`
-	PID          int    `json:"pid,omitempty"`
-	StartedAt    int64  `json:"started_at,omitempty"` // unix sec, 0 if never started
-	UpdatedAt    int64  `json:"updated_at,omitempty"` // unix sec
+	Name         string                   `json:"name"`
+	State        string                   `json:"state"`
+	LastError    string                   `json:"last_error,omitempty"`
+	RestartCount int                      `json:"restart_count,omitempty"`
+	PID          int                      `json:"pid,omitempty"`
+	StartedAt    int64                    `json:"started_at,omitempty"` // unix sec, 0 if never started
+	UpdatedAt    int64                    `json:"updated_at,omitempty"` // unix sec
+	Targets      []PluginTargetHealthWire `json:"targets,omitempty"`
+}
+
+// PluginTargetHealthWire is the source-level health carried inside a plugin
+// heartbeat entry. Multi-target metric plugins use this for individual scrape
+// targets / database sources.
+type PluginTargetHealthWire struct {
+	ID            string `json:"id"`
+	Name          string `json:"name,omitempty"`
+	Kind          string `json:"kind,omitempty"`
+	State         string `json:"state"`
+	LastError     string `json:"last_error,omitempty"`
+	Samples       int    `json:"samples,omitempty"`
+	LastSuccessAt int64  `json:"last_success_at,omitempty"`
+	UpdatedAt     int64  `json:"updated_at,omitempty"`
 }
 
 // HeartbeatResponse is empty but kept as a typed value so callers can

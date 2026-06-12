@@ -1,6 +1,7 @@
 package collector
 
 import (
+	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -85,21 +86,21 @@ func FlattenSamples(now time.Time, source string, families []*dto.MetricFamily, 
 				if m.Gauge == nil {
 					continue
 				}
-				out = append(out, tunnel.PromSample{
+				appendPromSample(&out, tunnel.PromSample{
 					Name: name, Labels: labels, Value: m.Gauge.GetValue(), TsMs: ts,
 				})
 			case dto.MetricType_COUNTER:
 				if m.Counter == nil {
 					continue
 				}
-				out = append(out, tunnel.PromSample{
+				appendPromSample(&out, tunnel.PromSample{
 					Name: name, Labels: labels, Value: m.Counter.GetValue(), TsMs: ts,
 				})
 			case dto.MetricType_UNTYPED:
 				if m.Untyped == nil {
 					continue
 				}
-				out = append(out, tunnel.PromSample{
+				appendPromSample(&out, tunnel.PromSample{
 					Name: name, Labels: labels, Value: m.Untyped.GetValue(), TsMs: ts,
 				})
 			case dto.MetricType_SUMMARY:
@@ -109,14 +110,12 @@ func FlattenSamples(now time.Time, source string, families []*dto.MetricFamily, 
 				for _, q := range m.Summary.GetQuantile() {
 					ql := cloneLabels(labels)
 					ql["quantile"] = strconvF64(q.GetQuantile())
-					out = append(out, tunnel.PromSample{
+					appendPromSample(&out, tunnel.PromSample{
 						Name: name, Labels: ql, Value: q.GetValue(), TsMs: ts,
 					})
 				}
-				out = append(out,
-					tunnel.PromSample{Name: name + "_sum", Labels: labels, Value: m.Summary.GetSampleSum(), TsMs: ts},
-					tunnel.PromSample{Name: name + "_count", Labels: labels, Value: float64(m.Summary.GetSampleCount()), TsMs: ts},
-				)
+				appendPromSample(&out, tunnel.PromSample{Name: name + "_sum", Labels: labels, Value: m.Summary.GetSampleSum(), TsMs: ts})
+				appendPromSample(&out, tunnel.PromSample{Name: name + "_count", Labels: labels, Value: float64(m.Summary.GetSampleCount()), TsMs: ts})
 			case dto.MetricType_HISTOGRAM:
 				if m.Histogram == nil {
 					continue
@@ -124,19 +123,26 @@ func FlattenSamples(now time.Time, source string, families []*dto.MetricFamily, 
 				for _, b := range m.Histogram.GetBucket() {
 					bl := cloneLabels(labels)
 					bl["le"] = strconvF64(b.GetUpperBound())
-					out = append(out, tunnel.PromSample{
+					appendPromSample(&out, tunnel.PromSample{
 						Name: name + "_bucket", Labels: bl,
 						Value: float64(b.GetCumulativeCount()), TsMs: ts,
 					})
 				}
-				out = append(out,
-					tunnel.PromSample{Name: name + "_sum", Labels: labels, Value: m.Histogram.GetSampleSum(), TsMs: ts},
-					tunnel.PromSample{Name: name + "_count", Labels: labels, Value: float64(m.Histogram.GetSampleCount()), TsMs: ts},
-				)
+				appendPromSample(&out, tunnel.PromSample{Name: name + "_sum", Labels: labels, Value: m.Histogram.GetSampleSum(), TsMs: ts})
+				appendPromSample(&out, tunnel.PromSample{Name: name + "_count", Labels: labels, Value: float64(m.Histogram.GetSampleCount()), TsMs: ts})
 			}
 		}
 	}
 	return out
+}
+
+func appendPromSample(out *[]tunnel.PromSample, sample tunnel.PromSample) {
+	// The edge tunnel currently uses JSON; NaN/Inf are valid Prometheus
+	// exposition values but cannot be JSON-encoded.
+	if math.IsNaN(sample.Value) || math.IsInf(sample.Value, 0) {
+		return
+	}
+	*out = append(*out, sample)
 }
 
 // --- helpers ------------------------------------------------------------

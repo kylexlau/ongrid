@@ -3,11 +3,13 @@ package edge
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 
 	model "github.com/ongridio/ongrid/internal/manager/model/edge"
 	"github.com/ongridio/ongrid/internal/pkg/errs"
+	"github.com/ongridio/ongrid/internal/pkg/tunnel"
 )
 
 // PluginConfigRepo is the narrow persistence contract this biz layer
@@ -24,6 +26,13 @@ type PluginConfigRepo interface {
 // configs". Implemented by frontierbound.Client.PluginConfigsChanged.
 type EdgeReloadNotifier interface {
 	NotifyPluginConfigsChanged(ctx context.Context, edgeID uint64) error
+}
+
+// DatabaseMetricsSecretWriter writes a managed databasemetrics credential file
+// on an edge. Implemented by the frontierbound client. The manager calls this
+// during a UI save and then persists only the non-secret plugin spec.
+type DatabaseMetricsSecretWriter interface {
+	WriteDatabaseMetricsSecrets(ctx context.Context, edgeID uint64, reqs []tunnel.WriteDatabaseMetricsSecretRequest) error
 }
 
 // EndpointResolver returns the data plane endpoint a given plugin
@@ -50,10 +59,11 @@ type EndpointResolver interface {
 // the affected edge so changes propagate within seconds, not within the
 // edge's 60s safety-net poll window.
 type PluginConfigUC struct {
-	repo     PluginConfigRepo
-	notifier EdgeReloadNotifier
-	resolver EndpointResolver
-	log      *slog.Logger
+	repo         PluginConfigRepo
+	notifier     EdgeReloadNotifier
+	secretWriter DatabaseMetricsSecretWriter
+	resolver     EndpointResolver
+	log          *slog.Logger
 }
 
 // NewPluginConfigUC builds the use-case. notifier may be nil during
@@ -71,6 +81,12 @@ func NewPluginConfigUC(repo PluginConfigRepo, notifier EdgeReloadNotifier, resol
 // the use-case before frontierbound is ready, then back-fills the
 // notifier once the tunnel is alive.
 func (uc *PluginConfigUC) SetNotifier(n EdgeReloadNotifier) { uc.notifier = n }
+
+// SetDatabaseMetricsSecretWriter injects the edge-side credential writer once
+// frontierbound is alive.
+func (uc *PluginConfigUC) SetDatabaseMetricsSecretWriter(w DatabaseMetricsSecretWriter) {
+	uc.secretWriter = w
+}
 
 // PluginRow is the UI/HTTP-friendly view of one plugin row.
 type PluginRow struct {
@@ -91,12 +107,14 @@ type PluginRow struct {
 // Data path:
 //   - hostmetrics — node_exporter subprocess exposing :9102/metrics
 //   - procmetrics — process_exporter subprocess exposing :9256/metrics
-//   - metrics — in-process scraper that pulls localhost:9102 and
-//     pushes via the tunnel's push_prom_samples RPC into cloud Prom's
+//   - metrics — parent metrics pipeline whose sub-plugins push via
+//     the tunnel's push_prom_samples RPC into cloud Prom's
 //     remote_write. This is the universal path that works for any
 //     edge (local or across the internet). It replaces the legacy
 //     prometheus.yml host.docker.internal scrape, which only ever
 //     worked for an edge co-resident with the manager.
+//   - custommetrics / databasemetrics — operator configured metric
+//     sub-plugins. They stay disabled until targets/sources are set.
 //   - logs / traces — promtail / otelcol subprocesses pushing direct
 //     to manager nginx via publicURL.
 //
@@ -134,6 +152,8 @@ func (uc *PluginConfigUC) ListForUI(ctx context.Context, edgeID uint64) ([]Plugi
 		model.PluginNameProfiles,
 		model.PluginNameHostMetrics,
 		model.PluginNameProcMetrics,
+		model.PluginNameCustomMetrics,
+		model.PluginNameDatabaseMetrics,
 	}
 	out := make([]PluginRow, 0, len(knownPlugins))
 	for _, name := range knownPlugins {
@@ -163,6 +183,27 @@ func (uc *PluginConfigUC) Set(ctx context.Context, edgeID uint64, plugin string,
 	if !model.IsKnownPluginName(plugin) {
 		return nil, fmt.Errorf("%w: unknown plugin %q", errs.ErrInvalid, plugin)
 	}
+	var databaseSecretReqs []tunnel.WriteDatabaseMetricsSecretRequest
+	var previous *model.PluginConfig
+	switch plugin {
+	case model.PluginNameCustomMetrics:
+		if err := validateCustomMetricsSpec(in.Spec); err != nil {
+			return nil, err
+		}
+	case model.PluginNameDatabaseMetrics:
+		spec, secretReqs, err := uc.prepareDatabaseMetricsSpec(in.Spec)
+		if err != nil {
+			return nil, err
+		}
+		in.Spec = spec
+		databaseSecretReqs = secretReqs
+		if len(databaseSecretReqs) > 0 {
+			previous, err = uc.repo.Get(ctx, edgeID, plugin)
+			if err != nil {
+				return nil, fmt.Errorf("load previous %s config: %w", plugin, err)
+			}
+		}
+	}
 	specJSON := "{}"
 	if in.Spec != nil {
 		blob, err := json.Marshal(in.Spec)
@@ -180,8 +221,24 @@ func (uc *PluginConfigUC) Set(ctx context.Context, edgeID uint64, plugin string,
 	if err != nil {
 		return nil, err
 	}
+	if len(databaseSecretReqs) > 0 {
+		if err := uc.writeDatabaseMetricsSecrets(ctx, edgeID, databaseSecretReqs); err != nil {
+			if rollbackErr := uc.rollbackPluginConfig(ctx, edgeID, plugin, previous); rollbackErr != nil {
+				return nil, errors.Join(err, fmt.Errorf("rollback plugin config: %w", rollbackErr))
+			}
+			return nil, err
+		}
+	}
 	uc.notify(ctx, edgeID, plugin)
 	return &PluginRow{PluginName: row.PluginName, Enabled: row.Enabled, Spec: decodeSpec(row.SpecJSON)}, nil
+}
+
+func (uc *PluginConfigUC) rollbackPluginConfig(ctx context.Context, edgeID uint64, plugin string, previous *model.PluginConfig) error {
+	if previous != nil {
+		_, err := uc.repo.Upsert(ctx, previous)
+		return err
+	}
+	return uc.repo.Delete(ctx, edgeID, plugin)
 }
 
 // FetchForEdge is the tunnel-RPC view: returns the wire snapshot the
@@ -212,6 +269,8 @@ func (uc *PluginConfigUC) FetchForEdge(ctx context.Context, edgeID uint64) (*Wir
 		model.PluginNameProfiles,
 		model.PluginNameHostMetrics,
 		model.PluginNameProcMetrics,
+		model.PluginNameCustomMetrics,
+		model.PluginNameDatabaseMetrics,
 	}
 	out := &WireSnapshot{EdgeID: edgeID, Configs: make(map[string]WireConfig, len(knownPlugins))}
 	enabledNames := make([]string, 0, len(knownPlugins))

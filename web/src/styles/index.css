@@ -137,6 +137,7 @@ html.light .bg-zinc-950\/40,
 html.light .bg-zinc-950\/60,
 html.light .bg-zinc-950\/70,
 html.light .bg-zinc-950\/80       { background-color: rgb(var(--bg) / 0.5); }
+html.light .bg-zinc-700\/40       { background-color: rgb(241 245 249); }
 html.light .bg-zinc-900\/30,
 html.light .bg-zinc-900\/40,
 html.light .bg-zinc-900\/50,
@@ -234,6 +235,14 @@ html.light .text-sky-200,
 html.light .text-sky-300             { color: rgb(3 105 161); }                /* sky-700 */
 html.light .border-sky-500\/30,
 html.light .border-sky-500\/40       { border-color: rgb(125 211 252); }       /* sky-300 */
+
+html.light .bg-cyan-500\/10          { background-color: rgb(207 250 254); }   /* cyan-100 */
+html.light .text-cyan-300            { color: rgb(14 116 144); }               /* cyan-700 */
+html.light .ring-cyan-500\/30        { --tw-ring-color: rgb(103 232 249); }    /* cyan-300 */
+
+html.light .bg-fuchsia-500\/10       { background-color: rgb(250 232 255); }   /* fuchsia-100 */
+html.light .text-fuchsia-300         { color: rgb(162 28 175); }               /* fuchsia-700 */
+html.light .ring-fuchsia-500\/30     { --tw-ring-color: rgb(240 171 252); }    /* fuchsia-300 */
 
 html.light .bg-emerald-500\/10       { background-color: rgb(209 250 229); }   /* emerald-100 */
 html.light .bg-emerald-500\/15       { background-color: rgb(209 250 229); }

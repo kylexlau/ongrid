@@ -37,6 +37,7 @@ func TestBuildBaseTools_FullSetWithAllDeps(t *testing.T) {
 	au := &fakeAlertUC{}
 
 	reg := NewRegistry(&fakeCaller{}, uc, nil, pq, lq, tq, au, slog.Default())
+	reg.SetPluginConfigLister(fakePluginConfigLister{})
 	closureNames := schemaNames(reg.Schemas())
 
 	bag := reg.BuildBaseTools()
@@ -81,6 +82,7 @@ func TestBuildBaseTools_GraphKernelToolBagCount(t *testing.T) {
 	au := &fakeAlertUC{}
 
 	reg := NewRegistry(&fakeCaller{}, uc, dc.usecase(), pq, lq, tq, au, slog.Default())
+	reg.SetPluginConfigLister(fakePluginConfigLister{})
 	bag := reg.BuildBaseTools()
 	bag = AppendHostFilesTools(bag, &fakeCaller{}, uc, dc.usecase(), slog.Default())
 
