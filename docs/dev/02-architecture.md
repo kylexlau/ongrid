@@ -86,7 +86,7 @@ flowchart TB
     edgeagent -.-> skill
 ```
 
-注意 `cmd/ongrid-edge` **绝不允许** import iam / manager——go-arch-lint v3 对 cmd
+注意 `cmd/ongrid-edge` **绝不允许** `import iam / manager`——`go-arch-lint v3` 对 cmd
 子目录无法原生表达这条，靠 review + CODEOWNERS 把守（见 `.go-arch-lint.yml` 注释）。
 
 ## BC 内分层
