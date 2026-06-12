@@ -133,8 +133,8 @@ docker-ongrid-edge: ## 构建 ongrid-edge 镜像
 # compose
 # ----------------------------------------------------------------------------
 
-.PHONY: compose-up compose-down _compose-certs
-compose-up: _compose-certs ## 本地 docker compose 启动
+.PHONY: compose-up compose-down _compose-certs _compose-edge-assets
+compose-up: _compose-certs _compose-edge-assets ## 本地 docker compose 启动
 	docker compose -f deploy/docker-compose.yml up -d
 
 compose-down: ## 本地 docker compose 停止
@@ -157,6 +157,13 @@ _compose-certs:
 		chmod 600 deploy/certs/tls.key; \
 		chmod 644 deploy/certs/tls.crt; \
 	fi
+
+# nginx 把 /install.sh、/uninstall.sh alias 到挂载的 bin/ 目录；生产包由
+# dist/package.sh 拷入，本地在每次 compose-up 前从源头同步，避免 404。
+_compose-edge-assets:
+	@mkdir -p bin
+	@install -m 755 deploy/install/edge/install.sh   bin/install.sh
+	@install -m 755 deploy/install/edge/uninstall.sh bin/uninstall.sh
 
 # ----------------------------------------------------------------------------
 # run
