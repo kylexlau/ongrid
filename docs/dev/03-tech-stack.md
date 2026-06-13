@@ -24,7 +24,7 @@
 | 子代理提示词 | `agents/*.md`（frontmatter + markdown） | coordinator 按 `when_to_use` 调度 specialist / investigator |
 | Skill | `internal/skill` 注册表 + `skills/` 定义 | 边端经 `execute_skill` RPC 分发；builtin 靠 `init()` 注册 |
 | 向量库 | Qdrant（`internal/pkg/qdrantx`） | 知识库 / 代码检索 RAG |
-| 嵌入 | fastembed-go + ONNX Runtime（本地 BGE 模型），可换云端 provider | `ONGRID_EMBEDDING_PROVIDER=local`；模型由 `make fetch-embedding-model` 预拉 |
+| 嵌入 | `fastembed-go` + ONNX Runtime（本地 BGE 模型），可换云端 provider | `ONGRID_EMBEDDING_PROVIDER=local`；模型由 `make fetch-embedding-model` 预拉 |
 | Web 搜索 | SearXNG（compose 内自托管） | agent 的 web search 工具后端 |
 | 文档抽取 | `internal/pkg/docextract` | 知识库入库管线 |
 
@@ -33,8 +33,8 @@
 | 组件 | 用途 | 接入封装 |
 |------|------|----------|
 | Prometheus | 指标存储；接收 manager remote_write（edge 推上来的开放集 exporter 样本） | `internal/pkg/promquery` / `promwrite` / `prom` |
-| Loki | 日志（edge 侧 promtail 采集推送） | `internal/pkg/logquery` |
-| Tempo | 分布式链路（edge 侧 otelcol-contrib） | `internal/pkg/tracequery` |
+| Loki | 日志（edge 侧 `promtail` 采集推送） | `internal/pkg/logquery` |
+| Tempo | 分布式链路（edge 侧 `otelcol-contrib`） | `internal/pkg/tracequery` |
 | Grafana | 仪表盘，nginx 反代 + 复用 ongrid 会话鉴权 | `internal/pkg/grafana`、`manager/biz/grafana` |
 | node_exporter / process-exporter | 主机 / 进程指标源，随 edge 包分发 | edge `plugins/hostmetrics`、`procmetrics` |
 | 自身指标 | `/healthz` `/readyz` `/metrics`（云端 :9100，边端 :9101） | `internal/pkg/httpserver` |
@@ -42,33 +42,31 @@
 ## 前端（web/）
 
 | 领域 | 选型 | 备注 |
-|------|------|------|
+|------|------|:-----|
 | 框架 | React 18 + TypeScript 5 + Vite 5 | SPA，`type: module` |
-| 样式 | Tailwind CSS 3 | 中性骨架 zinc、主操作 indigo、语义色仅 emerald/amber/red/sky（详见 AGENTS.md） |
-| 状态 | zustand | `web/src/store/`（auth / chatSessions / mode / modelSelection …） |
-| 路由 | react-router-dom 6 | 路由表集中在 `App.tsx` |
-| 图表 | recharts | 监控 / 报表曲线 |
-| 拓扑图 | @xyflow/react + @dagrejs/dagre | Topology 页面的图布局 |
-| 终端 | xterm.js（fit / web-links addon） | 浏览器 SSH / WebShell |
-| Markdown | react-markdown + remark-gfm | 聊天 / 报告渲染 |
-| 测试 | Vitest + Testing Library + MSW + jsdom | `npm run test` |
-| Lint | ESLint（typescript-eslint） | `--max-warnings 50` |
+| 样式 | Tailwind CSS 3 | 中性骨架 `zinc`、主操作 `indigo`、语义色仅 `emerald/amber/red/sky`（详见 AGENTS.md） |
+| 状态 | `zustand` | `web/src/store/`（`auth / chatSessions / mode / modelSelection` …） |
+| 路由 | `react-router-dom 6` | 路由表集中在 `App.tsx` |
+| 图表 | `recharts` | 监控 / 报表曲线 |
+| 拓扑图 | `@xyflow/react + @dagrejs/dagre` | Topology 页面的图布局 |
+| 终端 | `xterm.js（fit / web-links addon）` | 浏览器 SSH / WebShell |
+| Markdown | `react-markdown + remark-gfm` | 聊天 / 报告渲染 |
+| 测试 | Vitest + Testing Library + MSW + `jsdom` | `npm run test` |
+| Lint | ESLint（`typescript-eslint`） | `--max-warnings 50` |
 
 ## 构建 / 交付
 
 | 领域 | 选型 |
 |------|------|
 | 构建入口 | Makefile（唯一入口，CI / Dockerfile / README 都只调 make target） |
-| 镜像 | `deploy/Dockerfile.ongrid`（debian-slim + ONNX）、`Dockerfile.ongrid-edge`（distroless static）、`Dockerfile.web`（SPA + nginx）、`Dockerfile.frontier` |
-| 本地全栈 | `deploy/docker-compose.yml`（mysql, ongrid, nginx, frontier, prometheus, loki, tempo, searxng, qdrant, grafana） |
+| 镜像 | `deploy/Dockerfile.ongrid`（`debian-slim` + ONNX）、`Dockerfile.ongrid-edge`（distroless static）、`Dockerfile.web`（SPA + nginx）、`Dockerfile.frontier` |
+| 本地全栈 | `deploy/docker-compose.yml`（`mysql, ongrid, nginx, frontier, prometheus, loki, tempo, searxng, qdrant, grafana`） |
 | 发布物 | `make package` → 自包含 `ongrid-vX.Y.Z-linux-{amd64,arm64}.tar.xz`（镜像 + edge 二进制 + 采集器 + install.sh） |
-| Go lint | golangci-lint + go-arch-lint（BC 边界） |
-| 版本管理 | asdf（`.tool-versions`） |
+| Go lint | `golangci-lint + go-arch-lint`（BC 边界） |
+| 版本管理 | `asdf`（`.tool-versions`） |
 
 ## 项目规范体系
 
-- 全仓库遵循 [gospec](https://github.com/singchia/gospec)（Go 后端 SDLC 规范），
-  红线摘要在 [`AGENTS.md`](../../AGENTS.md)。
-- 重大设计决策以 ADR 编号引用（散见代码注释，如 ADR-003 租户上下文、ADR-005 私有 MVP 枢轴、
-  ADR-007 frontier、ADR-008 前端镜像、ADR-012/013/015 logs/traces 插件、ADR-024 edge 升级 bundle）。
+- 全仓库遵循 **[gospec](https://github.com/singchia/gospec)**（Go 后端 `SDLC` 规范），红线摘要在 [`AGENTS.md`](../../AGENTS.md)。
+- 重大设计决策以 ADR 编号引用（散见代码注释，如 ADR-003 租户上下文、ADR-005 私有 MVP 枢轴、ADR-007 frontier、ADR-008 前端镜像、ADR-012/013/015 logs/traces 插件、ADR-024 edge 升级 bundle）。
 - 输出语言默认中文（注释 / 文档 / commit message）。
