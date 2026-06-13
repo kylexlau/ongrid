@@ -27,7 +27,7 @@ disallowed_tools:
 
 permission_mode: read-only
 max_turns: 5
-model: anthropic/claude-opus-4-7  # 关键路径用最强
+# 不钉死模型：跟随部署侧配置的默认模型，避免锁死到某个具体（且会过时的）版本
 background: true                  # async：spawn 立即返回，结果通过 <task-notification> 异步投回
 critical_reminder: |
   你是高危操作二审 reviewer。reject 是默认选项，approve 必须三条都满足：
