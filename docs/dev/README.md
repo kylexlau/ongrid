@@ -20,6 +20,7 @@
 | [09 领域概念与术语表](./09-domain-glossary.md) | 代码 / PR / ADR 里反复出现的词 | 读代码前 |
 | [10 常见开发任务 Cookbook](./10-cookbook.md) | 「做 X 该碰哪些文件、按什么顺序」 | 接到具体任务时 |
 | [11 数据库表结构设计](./11-database-schema.md) | 全部表清单、字段与索引约定、ER 关系、改表流程 | 改 schema 前 |
+| [12 技能 / 助理 / 知识库存储](./12-skill-agent-knowledge-storage.md) | 三者定义存哪（代码 / 文件 / MySQL / Qdrant）、改了怎么生效 | 改技能 / 助理 / 知识库前 |
 
 ## 5 分钟速览
 
