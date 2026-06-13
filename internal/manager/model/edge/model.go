@@ -50,6 +50,12 @@ type Edge struct {
 	// junction (Type=Host); this field is kept synchronised by the
 	// register flow so old callers that read e.DeviceID don't break.
 	DeviceID  *uint64        `gorm:"index;column:device_id"`
+	// ShellUser is the OS user WebSSH logs in as on this host, self-reported
+	// by the agent on register_edge (set at install via
+	// ONGRID_EDGE_SHELL_USER). The webshell handler uses it as the SSH user
+	// for keyless login. Empty for pre-keyless agents → handler falls back
+	// to "root".
+	ShellUser string         `gorm:"size:64;not null;default:'';column:shell_user"`
 	CreatedBy *uint64        `gorm:"column:created_by"` // audit only
 	CreatedAt time.Time      `gorm:"column:created_at"`
 	UpdatedAt time.Time      `gorm:"column:updated_at"`

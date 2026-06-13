@@ -349,6 +349,14 @@ func (u *Usecase) HandleRegister(ctx context.Context, edgeID uint64, info tunnel
 			return fmt.Errorf("set agent version: %w", err)
 		}
 	}
+	// Persist the WebSSH login user when reported. Empty means a pre-keyless
+	// agent — leave the existing column alone (the webshell handler falls
+	// back to "root" when it's blank) rather than blanking a known value.
+	if su := strings.TrimSpace(info.ShellUser); su != "" && su != edge.ShellUser {
+		if err := u.repo.SetShellUser(ctx, edgeID, su); err != nil {
+			return fmt.Errorf("set shell user: %w", err)
+		}
+	}
 	return nil
 }
 

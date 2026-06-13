@@ -352,6 +352,14 @@ type EdgeConfig struct {
 	//
 	// env: ONGRID_EDGE_COLLECTOR_INTERVAL; default 10s
 	CollectorInterval time.Duration
+
+	// ShellUser is the OS user WebSSH logs in as on this host. Set at
+	// install time (install.sh --shell-user, default the installing
+	// SUDO_USER) and reported to the manager on register so it can SSH in
+	// keylessly as this user. Empty → manager falls back to "root".
+	//
+	// env: ONGRID_EDGE_SHELL_USER; default empty
+	ShellUser string
 }
 
 // Load reads env vars and returns a Config with defaults applied.
@@ -418,6 +426,7 @@ func Load() (*Config, error) {
 	c.Edge.CollectorMode = getEnv("ONGRID_EDGE_COLLECTOR_MODE", "off")
 	c.Edge.ScrapeConfigFile = getEnv("ONGRID_EDGE_SCRAPE_CONFIG_FILE", "/etc/ongrid-edge/scrape.yaml")
 	c.Edge.CollectorInterval = getEnvDuration("ONGRID_EDGE_COLLECTOR_INTERVAL", 10*time.Second)
+	c.Edge.ShellUser = getEnv("ONGRID_EDGE_SHELL_USER", "")
 
 	c.FrontierClient.Addr = getEnv("ONGRID_FRONTIER_ADDR", "frontier:40011")
 	c.FrontierClient.ServiceName = getEnv("ONGRID_FRONTIER_SERVICE_NAME", "ongrid-manager")

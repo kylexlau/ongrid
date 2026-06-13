@@ -333,6 +333,17 @@ func (r *fakeRepo) SetAgentVersion(_ context.Context, id uint64, v string) error
 	return nil
 }
 
+func (r *fakeRepo) SetShellUser(_ context.Context, id uint64, u string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	e, ok := r.byID[id]
+	if !ok || e.DeletedAt.Valid {
+		return errs.ErrNotFound
+	}
+	e.ShellUser = u
+	return nil
+}
+
 func (r *fakeRepo) Delete(_ context.Context, id uint64) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()

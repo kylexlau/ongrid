@@ -1034,12 +1034,24 @@ func main() {
 	// WebSSH HTTP handler — uses fbClient.OpenStream to layer ssh +
 	// pty over a raw byte stream into edge:127.0.0.1:22. SSH client
 	// runs in the manager; edge is a dumb byte forwarder.
+	//
+	// Keyless auth: the manager holds a WebSSH ed25519 key (generated on
+	// first boot, persisted in system_settings). install.sh installs the
+	// matching public key into the target user's authorized_keys, so the
+	// manager logs in without a password. Generation failure is non-fatal —
+	// the handler falls back to the browser-supplied password path.
+	webshellKeys, err := managerwebshellbiz.LoadOrCreateKeys(rootCtx, settingSvc)
+	if err != nil {
+		log.Error("webssh: load/create signing key; keyless WebSSH disabled", slog.Any("err", err))
+		webshellKeys = nil
+	}
 	webshellHandler := managerwebshellserver.NewHandler(
 		webshellStreamerAdapter{c: fbClient},
 		webshellRouter,
 		webshellAuditAdapter{repo: webshellAuditRepo},
 		deviceRepo,
 		edgeRepo,
+		webshellKeys,
 		log.With(slog.String("comp", "webshell")),
 	)
 	webshellHandler.SetAuthz(authzMW)
@@ -1802,6 +1814,9 @@ func main() {
 	mux.Route("/api", func(api chi.Router) {
 		iamHandler.RegisterPublic(api)
 		promProxyHandler.RegisterPublic(api)
+		// WebSSH public key endpoint — install.sh fetches it anonymously to
+		// set up keyless login (the body is a public key).
+		webshellHandler.RegisterPublic(api)
 		// IM webhooks live OUTSIDE the bearer group — Feishu / DingTalk
 		// can't carry our manager JWT. Auth comes from the platform
 		// signature scheme inside the handler.
