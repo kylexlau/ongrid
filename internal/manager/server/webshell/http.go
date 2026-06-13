@@ -61,14 +61,19 @@ type Handler struct {
 	audit    bizwebshell.Recorder
 	devices  DeviceRepo
 	edges    edgebiz.Repo
+	keys     *bizwebshell.Keys
 	authz    AuthzMW
 	log      *slog.Logger
 	upgrader websocket.Upgrader
 }
 
-// NewHandler builds the HTTP handler.
+// NewHandler builds the HTTP handler. keys carries the manager's WebSSH SSH
+// signer (for keyless public-key auth into edge hosts) and the public
+// authorized_keys line served to install.sh; it may be nil in tests /
+// degraded boots, in which case the handler falls back to the password
+// supplied in the open frame.
 func NewHandler(streamer Streamer, router *bizwebshell.Router, audit bizwebshell.Recorder,
-	devices DeviceRepo, edges edgebiz.Repo, log *slog.Logger,
+	devices DeviceRepo, edges edgebiz.Repo, keys *bizwebshell.Keys, log *slog.Logger,
 ) *Handler {
 	if log == nil {
 		log = slog.Default()
@@ -79,6 +84,7 @@ func NewHandler(streamer Streamer, router *bizwebshell.Router, audit bizwebshell
 		audit:    audit,
 		devices:  devices,
 		edges:    edges,
+		keys:     keys,
 		log:      log,
 		upgrader: websocket.Upgrader{
 			ReadBufferSize:  4096,
@@ -125,6 +131,34 @@ func (h *Handler) Register(r chi.Router) {
 }
 
 func passthrough(next http.Handler) http.Handler { return next }
+
+// RegisterPublic mounts the unauthenticated authorized-key endpoint that
+// install.sh fetches to set up keyless WebSSH. The body is a public SSH
+// public key — safe to serve without auth.
+func (h *Handler) RegisterPublic(r chi.Router) {
+	r.Get("/v1/edge/webssh-authorized-key", h.serveAuthorizedKey)
+}
+
+// serveAuthorizedKey returns the manager's WebSSH authorized_keys line as
+// text/plain so install.sh can append it to the target user's
+// ~/.ssh/authorized_keys. Returns 503 when key auth is not configured.
+//
+// @Summary     WebSSH 公钥（authorized_keys 行）
+// @Description 返回 manager 的 WebSSH 公钥，供 install.sh 写入目标用户的 authorized_keys 实现免密登录
+// @Tags        webshell
+// @Produce     plain
+// @Success     200 {string} string "authorized_keys 单行文本"
+// @Failure     503 {string} string "WebSSH 密钥未配置"
+// @Router      /v1/edge/webssh-authorized-key [get]
+func (h *Handler) serveAuthorizedKey(w http.ResponseWriter, _ *http.Request) {
+	if h.keys == nil {
+		http.Error(w, "webssh key auth not configured", http.StatusServiceUnavailable)
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	_, _ = io.WriteString(w, h.keys.AuthorizedKeyLine())
+}
 
 // streamMeta is what we put in the frontier stream's Meta blob so
 // the edge knows where to forward bytes.
@@ -213,8 +247,29 @@ func (h *Handler) openShell(w http.ResponseWriter, r *http.Request) {
 		br.closeWith(websocket.CloseProtocolError, "bad open frame")
 		return
 	}
-	if openFrame.SSHUser == "" || openFrame.SSHPass == "" {
-		br.closeWith(websocket.CloseProtocolError, "ssh_user / ssh_pass required")
+	// Resolve the SSH login user. Keyless WebSSH no longer asks the browser
+	// for credentials: the user is whatever the edge reported at install
+	// (edge.ShellUser), falling back to "root". An explicit ssh_user in the
+	// open frame (older browsers) still wins for back-compat.
+	sshUser := strings.TrimSpace(openFrame.SSHUser)
+	if sshUser == "" {
+		sshUser = strings.TrimSpace(edge.ShellUser)
+	}
+	if sshUser == "" {
+		sshUser = "root"
+	}
+	// Auth methods, tried in order: manager public key first (keyless
+	// default), then any password the browser supplied (back-compat /
+	// break-glass). At least one must be present.
+	var authMethods []ssh.AuthMethod
+	if h.keys != nil {
+		authMethods = append(authMethods, ssh.PublicKeys(h.keys.Signer()))
+	}
+	if openFrame.SSHPass != "" {
+		authMethods = append(authMethods, ssh.Password(openFrame.SSHPass))
+	}
+	if len(authMethods) == 0 {
+		br.closeWith(websocket.CloseProtocolError, "no ssh auth method available (key unconfigured and no password)")
 		return
 	}
 	cols, rows := openFrame.Cols, openFrame.Rows
@@ -235,7 +290,7 @@ func (h *Handler) openShell(w http.ResponseWriter, r *http.Request) {
 	if err := h.audit.Open(r.Context(), &wsmodel.Session{
 		ID:           sid,
 		OngridUserID: tenant.UserID,
-		SSHUser:      openFrame.SSHUser,
+		SSHUser:      sshUser,
 		DeviceID:     deviceID,
 		EdgeID:       edge.ID,
 		ClientIP:     clientIP(r),
@@ -248,7 +303,7 @@ func (h *Handler) openShell(w http.ResponseWriter, r *http.Request) {
 	h.router.Register(sid, br, bizwebshell.ActiveSession{
 		SessionID:    sid,
 		OngridUserID: tenant.UserID,
-		SSHUser:      openFrame.SSHUser,
+		SSHUser:      sshUser,
 		DeviceID:     deviceID,
 		EdgeID:       edge.ID,
 		StartedAt:    startedAt,
@@ -275,8 +330,8 @@ func (h *Handler) openShell(w http.ResponseWriter, r *http.Request) {
 
 	// Wrap stream with SSH client conn.
 	sshCfg := &ssh.ClientConfig{
-		User:            openFrame.SSHUser,
-		Auth:            []ssh.AuthMethod{ssh.Password(openFrame.SSHPass)},
+		User:            sshUser,
+		Auth:            authMethods,
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(), // localhost-only path
 		Timeout:         10 * time.Second,
 	}
@@ -288,7 +343,7 @@ func (h *Handler) openShell(w http.ResponseWriter, r *http.Request) {
 		failMsg := sshErr.Error()
 		// Map common cases to friendlier messages.
 		if strings.Contains(failMsg, "unable to authenticate") {
-			failMsg = "用户名或密码错误"
+			failMsg = fmt.Sprintf("认证失败：无法以 %s 登录（请确认该设备已安装 WebSSH 免密公钥，或重新运行安装命令）", sshUser)
 		}
 		br.sendText(map[string]any{"type": "auth_error", "message": failMsg})
 		h.closeAudit(sid, br, 0, wsmodel.TerminatedBySSHAuthFail)
@@ -326,7 +381,7 @@ func (h *Handler) openShell(w http.ResponseWriter, r *http.Request) {
 		br.closeWith(websocket.CloseNormalClosure, "start shell")
 		return
 	}
-	br.sendText(map[string]any{"type": "ready"})
+	br.sendText(map[string]any{"type": "ready", "ssh_user": sshUser})
 
 	// Wire the bridge for admin Kill.
 	pumpDone := make(chan terminationCause, 4)

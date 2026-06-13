@@ -61,6 +61,11 @@ type Config struct {
 	// AgentVersion is reported on register_edge (optional).
 	AgentVersion string
 
+	// ShellUser is the OS user WebSSH logs in as on this host, reported on
+	// register_edge so the manager can SSH in keylessly as this user.
+	// Empty → manager falls back to "root".
+	ShellUser string
+
 	// UpgradeStageDir is where agent_upgrade stages downloaded binaries.
 	// Default /var/lib/ongrid-edge/.upgrade. Empty disables the
 	// MethodAgentUpgrade handler entirely (useful for dev where systemd
@@ -350,6 +355,10 @@ func (a *Agent) registerEdge(ctx context.Context) error {
 	if err != nil {
 		a.log.Warn("agent: HostInfo collection failed", slog.Any("err", err))
 	}
+	// Carry the configured WebSSH login user in the register payload so the
+	// manager can SSH in keylessly as this user. It's agent config, not a
+	// collected host fact, so we set it here rather than in the collector.
+	info.ShellUser = a.cfg.ShellUser
 	req := tunnel.RegisterEdgeRequest{
 		AccessKey:    "", // server-side AuthFunc matches by Meta, not body
 		SecretKey:    "",

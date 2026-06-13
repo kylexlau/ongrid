@@ -1,25 +1,26 @@
 // DeviceShell — full-page WebSSH terminal.
 //
-// Flow:
-//   1. Page mounts → fetch device metadata (hostname for the modal title)
-//      and pop the Connect modal. localStorage may pre-fill the os user.
-//   2. User submits the modal → open WS, send first `open` frame with
-//      cols/rows from the freshly-fitted xterm.
-//   3. Manager replies with `ready` (SSH up) → terminal becomes interactive.
-//      Binary frames are stdout; binary user input is wrapped to stdin.
-//   4. `auth_error` / `exit` / WS close → write a red banner, gate the
-//      reconnect button. The user can hit `重连` to re-show the modal.
+// Keyless flow:
+//   1. Page mounts → auto-connect (no login dialog). Device metadata is
+//      fetched in parallel just for the title / status line.
+//   2. WS opens → send the first `open` frame with cols/rows from the
+//      freshly-fitted xterm (no credentials — the manager logs in with its
+//      own key as the user the edge reported at install).
+//   3. Manager replies with `ready` (SSH up, carries the login user) → the
+//      terminal becomes interactive. Binary frames are stdout; binary user
+//      input is wrapped to stdin.
+//   4. `auth_error` / `exit` / WS close → write a red banner. The user can
+//      hit `重连` to retry.
 //
 // Security:
-//   - Password lives only in component state; never logged, never stored.
-//   - Only the os username (opt-in) is persisted to localStorage.
+//   - No credentials are sent or stored by the browser; auth is the
+//     manager's server-side key plus RBAC on the shell endpoint.
 //   - onbeforeunload sends a polite `{type:"close"}` so the manager can
 //     finalize the audit row without waiting for TCP timeout.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { Power, RotateCw, Terminal as TerminalIcon } from 'lucide-react';
-import { Modal } from '@/components/Modal';
 import { Button } from '@/components/ui/Button';
 import { XTerminal, type XTerminalApi } from '@/components/XTerminal';
 import { getEdge, listEdges, type Edge } from '@/api/edges';
@@ -35,24 +36,11 @@ import { tr as trInline, useI18n } from '@/i18n/locale';
 import { Card, EmptyState, PageHeader } from '@/components/ui';
 import { Shield } from 'lucide-react';
 
-type ConnectInputs = {
-  user: string;
-  password: string;
-  port: number;
-  remember: boolean;
-};
-
 type ConnState =
   | { kind: 'idle' }
   | { kind: 'connecting' }
   | { kind: 'open' }
   | { kind: 'closed'; reason?: string };
-
-const REMEMBER_USER_KEY_PREFIX = 'webshell.last_user.';
-
-function rememberUserKey(deviceId: string) {
-  return `${REMEMBER_USER_KEY_PREFIX}${deviceId}`;
-}
 
 // ANSI red wrapper for inline error messages. xterm renders the escape
 // sequence so we don't need a separate DOM element for status lines.
@@ -90,8 +78,10 @@ export default function DeviceShellPage() {
 
   const [edge, setEdge] = useState<Edge | null>(null);
   const [edgeError, setEdgeError] = useState<string | null>(null);
-  const [modalOpen, setModalOpen] = useState(true);
   const [conn, setConn] = useState<ConnState>({ kind: 'idle' });
+  // connectedUser is the OS user the manager logged in as, reported in the
+  // `ready` frame. Shown in the status line so operators know who they are.
+  const [connectedUser, setConnectedUser] = useState<string | null>(null);
 
   // The terminal API + ws live on refs — they're side-effectful and
   // outliving any single render is the whole point of this page.
@@ -209,14 +199,14 @@ export default function DeviceShellPage() {
     };
   }, [sendCloseOnce]);
 
-  // openConnection: wire WS handshake to the open frame. Called from the
-  // modal Connect button.
+  // openConnection: open the WS and send the geometry-only `open` frame.
+  // Keyless — no credentials. Called on mount (auto-connect) and from "重连".
   const openConnection = useCallback(
-    async (inputs: ConnectInputs) => {
+    async () => {
       const token = getToken();
       if (!token) {
         writeBanner(ansiRed(tr('未登录或登录已过期，请重新登录', 'Not logged in or session expired; please log in again')));
-        setModalOpen(true);
+        setConn({ kind: 'closed', reason: 'auth' });
         return;
       }
       // Tear down any previous socket (e.g. user hit "重连").
@@ -235,7 +225,6 @@ export default function DeviceShellPage() {
         if (fatal) {
           writeBanner(ansiRed(fatal));
           setConn({ kind: 'closed', reason: 'preflight' });
-          setModalOpen(true);
           return;
         }
       }
@@ -246,19 +235,12 @@ export default function DeviceShellPage() {
 
       ws.onopen = () => {
         const { cols, rows } = sizeRef.current;
-        const sshHost = inputs.port && inputs.port !== 22 ? `127.0.0.1:${inputs.port}` : '';
         sendControl(ws, {
           type: 'open',
           cols,
           rows,
           term: 'xterm-256color',
-          ssh_user: inputs.user,
-          ssh_pass: inputs.password,
-          ssh_host: sshHost,
         });
-        // We deliberately do NOT clear inputs.password from the closure —
-        // it's already only in stack memory + the WS frame buffer. Once
-        // ws.send returns, the only reference is the GCable closure.
       };
 
       ws.onmessage = (ev) => {
@@ -276,15 +258,17 @@ export default function DeviceShellPage() {
         }
         if (!frame || typeof frame.type !== 'string') return;
         switch (frame.type) {
-          case 'ready':
+          case 'ready': {
+            const user = frame.ssh_user || '';
+            setConnectedUser(user || null);
             setConn({ kind: 'open' });
-            writeBanner(ansiDim(tr(`-- SSH 已连接 (${inputs.user}@${edge?.name ?? deviceId}) --`, `-- SSH connected (${inputs.user}@${edge?.name ?? deviceId}) --`)));
+            const who = user ? `${user}@${edge?.name ?? deviceId}` : String(edge?.name ?? deviceId);
+            writeBanner(ansiDim(tr(`-- SSH 已连接 (${who}) --`, `-- SSH connected (${who}) --`)));
             break;
+          }
           case 'auth_error':
-            writeBanner(ansiRed(tr(`SSH 认证失败：${frame.message || '用户名或密码错误'}`, `SSH auth failed: ${frame.message || 'invalid username or password'}`)));
+            writeBanner(ansiRed(tr(`SSH 认证失败：${frame.message || '无法登录该设备'}`, `SSH auth failed: ${frame.message || 'cannot log in to this device'}`)));
             setConn({ kind: 'closed', reason: 'auth' });
-            // Re-open the modal so the user can retry without leaving.
-            setModalOpen(true);
             break;
           case 'exit': {
             const code = frame.exit_code ?? 0;
@@ -320,7 +304,6 @@ export default function DeviceShellPage() {
             const detail = explainPreflight(p.status, p.message);
             if (detail) writeBanner(ansiRed(detail));
           });
-          setModalOpen(true);
         } else if (ev.code !== 1000 && ev.code !== 1005) {
           writeBanner(
             ansiDim(tr(
@@ -329,6 +312,7 @@ export default function DeviceShellPage() {
             )),
           );
         }
+        setConnectedUser(null);
         setConn((s) => (s.kind === 'closed' ? s : { kind: 'closed' }));
         wsRef.current = null;
       };
@@ -342,6 +326,17 @@ export default function DeviceShellPage() {
     },
     [deviceId, edge, teardown, writeBanner],
   );
+
+  // Auto-connect once on mount — no login dialog. Guarded by a ref so the
+  // openConnection identity changing (edge metadata loading) doesn't reopen
+  // a second socket.
+  const autoConnectedRef = useRef(false);
+  useEffect(() => {
+    if (autoConnectedRef.current) return;
+    autoConnectedRef.current = true;
+    void openConnection();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Wire xterm onData → ws via a ref-based pump so we don't have to
   // re-mount the terminal when the socket changes (reconnect).
@@ -363,29 +358,6 @@ export default function DeviceShellPage() {
     termRef.current = api;
   }, []);
 
-  // Modal submit handler. Persists the username choice and kicks off the
-  // WS handshake; password is dropped on the floor after this returns.
-  const handleConnect = useCallback(
-    (inputs: ConnectInputs) => {
-      if (inputs.remember) {
-        try {
-          localStorage.setItem(rememberUserKey(deviceId), inputs.user);
-        } catch {
-          /* private mode / quota — non-fatal */
-        }
-      } else {
-        try {
-          localStorage.removeItem(rememberUserKey(deviceId));
-        } catch {
-          /* noop */
-        }
-      }
-      setModalOpen(false);
-      openConnection(inputs);
-    },
-    [deviceId, openConnection],
-  );
-
   const handleManualClose = useCallback(() => {
     if (!confirm(tr('确定要关闭终端会话？', 'Close this terminal session?'))) return;
     teardown();
@@ -393,10 +365,8 @@ export default function DeviceShellPage() {
   }, [navigate, teardown]);
 
   const handleReconnect = useCallback(() => {
-    teardown();
-    setConn({ kind: 'idle' });
-    setModalOpen(true);
-  }, [teardown]);
+    void openConnection();
+  }, [openConnection]);
 
   const statusLabel = useMemo(() => {
     switch (conn.kind) {
@@ -432,6 +402,12 @@ export default function DeviceShellPage() {
           >
             {statusLabel}
           </span>
+          {connectedUser && (
+            <>
+              <span className="text-zinc-600">·</span>
+              <span className="text-zinc-400">{connectedUser}</span>
+            </>
+          )}
           {edgeError && (
             <span className="ml-2 text-red-400">· {edgeError}</span>
           )}
@@ -463,184 +439,7 @@ export default function DeviceShellPage() {
           attachRef={attachTerm}
         />
       </div>
-
-      <ConnectModal
-        open={modalOpen}
-        deviceId={deviceId}
-        title={tr(`连接到 ${hostname}`, `Connect to ${hostname}`)}
-        onCancel={() => {
-          // If we never connected, leave the page; otherwise just hide
-          // the modal (terminal is still useful for reading prior output).
-          if (conn.kind === 'idle' || conn.kind === 'closed') {
-            navigate('/devices');
-          } else {
-            setModalOpen(false);
-          }
-        }}
-        onSubmit={handleConnect}
-      />
     </main>
-  );
-}
-
-// ConnectModal collects ssh user / password / port. We keep it inline so
-// the password lifetime is bounded by this component's mount window.
-function ConnectModal({
-  open,
-  deviceId,
-  title,
-  onSubmit,
-  onCancel,
-}: {
-  open: boolean;
-  deviceId: string;
-  title: string;
-  onSubmit(inputs: ConnectInputs): void;
-  onCancel(): void;
-}) {
-  const { tr } = useI18n();
-  const [user, setUser] = useState('');
-  const [password, setPassword] = useState('');
-  const [port, setPort] = useState<string>('22');
-  const [remember, setRemember] = useState(true);
-  const [advanced, setAdvanced] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
-
-  // Pre-fill the username from localStorage on first open. We don't
-  // depend on `deviceId` for the lifetime — the hook re-runs when the
-  // modal toggles open so reconnects keep the user remembered.
-  useEffect(() => {
-    if (!open) return;
-    setErr(null);
-    setPassword('');
-    try {
-      const last = localStorage.getItem(rememberUserKey(deviceId));
-      if (last) setUser(last);
-    } catch {
-      /* noop */
-    }
-  }, [open, deviceId]);
-
-  if (!open) return null;
-
-  const submit = () => {
-    const u = user.trim();
-    if (!u) {
-      setErr(tr('请输入 OS 用户名', 'Please enter the OS username'));
-      return;
-    }
-    if (!password) {
-      setErr(tr('请输入密码', 'Please enter the password'));
-      return;
-    }
-    const p = Number(port || '22');
-    if (!Number.isFinite(p) || p < 1 || p > 65535) {
-      setErr(tr('端口必须在 1-65535 之间', 'Port must be between 1 and 65535'));
-      return;
-    }
-    onSubmit({ user: u, password, port: p, remember });
-  };
-
-  return (
-    <Modal
-      open
-      onClose={onCancel}
-      title={title}
-      size="sm"
-      footer={
-        <>
-          <Button variant="ghost" onClick={onCancel}>
-            {tr('取消', 'Cancel')}
-          </Button>
-          <Button variant="subtle" onClick={submit}>
-            {tr('连接', 'Connect')}
-          </Button>
-        </>
-      }
-    >
-      <div className="space-y-3">
-        <div>
-          <label htmlFor="webssh-user" className="mb-1 block text-[11px] text-zinc-500">
-            {tr('OS 用户', 'OS user')}
-          </label>
-          <input
-            id="webssh-user"
-            autoFocus
-            autoComplete="username"
-            value={user}
-            onChange={(e) => setUser(e.target.value)}
-            placeholder="root"
-            className="w-full rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-xs text-zinc-100 focus:border-zinc-600 focus:outline-none"
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') submit();
-            }}
-          />
-        </div>
-        <div>
-          <label htmlFor="webssh-pass" className="mb-1 block text-[11px] text-zinc-500">
-            {tr('密码', 'Password')}
-          </label>
-          <input
-            id="webssh-pass"
-            type="password"
-            autoComplete="current-password"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            className="w-full rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-xs text-zinc-100 focus:border-zinc-600 focus:outline-none"
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') submit();
-            }}
-          />
-        </div>
-        <div>
-          <button
-            type="button"
-            onClick={() => setAdvanced((v) => !v)}
-            className="text-[11px] text-zinc-500 hover:text-zinc-300"
-          >
-            {advanced ? tr('收起高级', 'Hide advanced') : tr('高级选项 ▸', 'Advanced ▸')}
-          </button>
-          {advanced && (
-            <div className="mt-2">
-              <label htmlFor="webssh-port" className="mb-1 block text-[11px] text-zinc-500">
-                {tr('SSH 端口', 'SSH port')}
-              </label>
-              <input
-                id="webssh-port"
-                inputMode="numeric"
-                value={port}
-                onChange={(e) => setPort(e.target.value.replace(/[^0-9]/g, ''))}
-                placeholder="22"
-                className="w-32 rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-xs text-zinc-100 focus:border-zinc-600 focus:outline-none"
-              />
-              <p className="mt-1 text-[11px] text-zinc-600">
-                {tr('默认走设备本地 sshd（127.0.0.1:22）。改端口仅在本机另起 sshd 时有用。', "Defaults to the device's local sshd (127.0.0.1:22). Change only if you've started another sshd on a different port.")}
-              </p>
-            </div>
-          )}
-        </div>
-        <label className="flex cursor-pointer items-center gap-2 text-xs text-zinc-300">
-          <input
-            type="checkbox"
-            checked={remember}
-            onChange={(e) => setRemember(e.target.checked)}
-            className="h-3.5 w-3.5 accent-zinc-300"
-          />
-          {tr('记住此用户名（仅本浏览器，不保存密码）', 'Remember this username (this browser only; password is never stored)')}
-        </label>
-        {err && (
-          <div
-            role="alert"
-            className="rounded-lg border border-red-500/20 bg-red-500/10 px-3 py-2 text-xs text-red-300"
-          >
-            {err}
-          </div>
-        )}
-        <p className="text-[11px] text-zinc-600">
-          {tr('提示：密码不会被写入浏览器存储；关闭弹窗或刷新页面后立即丢弃。', 'Note: the password is never persisted in browser storage; it is discarded as soon as the dialog closes or the page reloads.')}
-        </p>
-      </div>
-    </Modal>
   );
 }
 

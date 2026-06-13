@@ -236,6 +236,14 @@ type HostInfo struct {
 	// fields are sent together so the cloud can migrate a device from its old
 	// HostID-derived fingerprint to this one in place. Empty is allowed.
 	HardwareFingerprint string `json:"hardware_fingerprint,omitempty"`
+
+	// ShellUser is the OS user WebSSH logs in as on this host. It is edge
+	// agent configuration (set at install via ONGRID_EDGE_SHELL_USER,
+	// default the installing SUDO_USER), not a discovered host fact — but
+	// it rides the register payload here so the cloud can persist it on the
+	// edge row and use it as the SSH user for keyless WebSSH. Empty for
+	// pre-keyless agents; the cloud then falls back to "root".
+	ShellUser string `json:"shell_user,omitempty"`
 }
 
 // RegisterEdgeRequest is the first RPC the edge sends after connecting.

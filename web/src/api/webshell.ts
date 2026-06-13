@@ -52,15 +52,16 @@ export function openShellSocket(
 }
 
 // ShellOpen is the first text frame the browser must send post-upgrade.
-// `ssh_host` defaults to "127.0.0.1:22" when empty — the edge agent runs
-// on the device's host network so localhost loops back to the OS sshd.
+// Keyless WebSSH: the browser sends only geometry — the manager logs in with
+// its own key as the user the edge reported at install time. ssh_user /
+// ssh_pass remain optional for back-compat (older flows / break-glass).
 export type ShellOpenFrame = {
   type: 'open';
   cols: number;
   rows: number;
   term: string;
-  ssh_user: string;
-  ssh_pass: string;
+  ssh_user?: string;
+  ssh_pass?: string;
   ssh_host?: string;
 };
 
@@ -83,7 +84,7 @@ export type ShellControlFrameOut =
 // `ready` confirms the SSH session is up; `auth_error` / `exit` are
 // terminal — the UI should print and let the WS close naturally.
 export type ShellControlFrameIn =
-  | { type: 'ready' }
+  | { type: 'ready'; ssh_user?: string }
   | { type: 'auth_error'; message: string }
   | { type: 'exit'; exit_code: number; message?: string };
 

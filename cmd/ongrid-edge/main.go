@@ -157,6 +157,7 @@ func main() {
 		MetricsInterval: cfg.Edge.CollectorInterval,
 		AgentVersion:    version,
 		UpgradeStageDir: stageDir,
+		ShellUser:       cfg.Edge.ShellUser,
 	}, log)
 
 	// Local /metrics listener for debugging.

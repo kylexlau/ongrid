@@ -173,6 +173,20 @@ func (r *Repo) SetAgentVersion(ctx context.Context, id uint64, version string) e
 	return nil
 }
 
+// SetShellUser records the OS user WebSSH logs in as, self-reported on
+// register_edge. Caller filters empty values upstream so we don't blank the
+// column when a pre-keyless agent reports nothing.
+func (r *Repo) SetShellUser(ctx context.Context, id uint64, user string) error {
+	res := r.db.WithContext(ctx).Model(&model.Edge{}).Where("id = ?", id).Update("shell_user", user)
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return errs.ErrNotFound
+	}
+	return nil
+}
+
 // Delete soft-deletes an edge (gorm's DeletedAt). Subsequent Get/List hide
 // the row.
 func (r *Repo) Delete(ctx context.Context, id uint64) error {

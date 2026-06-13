@@ -75,6 +75,24 @@ If the control plane and the edge agent run on the **same host**, use `127.0.0.1
 --server-edge-addr=127.0.0.1:40012
 ```
 
+### WebSSH keyless login
+
+The browser terminal (WebSSH) no longer prompts for a username or password. The manager runs the SSH client and authenticates to this host's `sshd` with a key it owns; the installer drops the matching **public** key into a target user's `~/.ssh/authorized_keys` so login is passwordless.
+
+- **Login user** — `--shell-user=USER` controls which OS user WebSSH logs in as. Default is the human who ran the installer (`SUDO_USER`), falling back to `root`. The value is stored in `ONGRID_EDGE_SHELL_USER` and reported to the manager on connect.
+- **The key is localhost-pinned** — the manager pins its entry with `from="127.0.0.1,::1"`, and WebSSH always reaches `sshd` through the local edge (127.0.0.1:22). A leaked key therefore cannot be used to log in from another machine.
+- **sshd requirements** — the host must run `sshd` with `PubkeyAuthentication yes` (the default). For `--shell-user=root`, `PermitRootLogin` must allow key login (`prohibit-password` / `without-password`). The installer warns if either looks off.
+- **Opt out** — pass `--no-webssh-key` to skip the `authorized_keys` change (WebSSH then won't work until a key is installed manually).
+- **Re-key / repair** — re-running the install command re-fetches and reinstalls the entry idempotently. `--uninstall` removes the `ongrid-webssh` line again.
+
+Manual install (e.g. for an extra user):
+
+```bash
+curl -k -sSL https://<server>/api/v1/edge/webssh-authorized-key >> ~/.ssh/authorized_keys
+```
+
+> Existing edges enrolled before this change need to re-run the install command once to set up the key.
+
 ### TLS
 
 Port 443 (nginx) handles TLS termination. The tunnel port (default 40012) uses plain TCP — do not configure a TLS CA for the edge connection.

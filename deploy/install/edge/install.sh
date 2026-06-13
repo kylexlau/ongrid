@@ -27,6 +27,11 @@ ACCESS_KEY=""
 SECRET_KEY=""
 SERVER_EDGE_ADDR=""
 SERVER_HTTP_ADDR=""
+# SHELL_USER is the OS user WebSSH logs in as. Defaults to the human who
+# invoked sudo (SUDO_USER), falling back to root. Resolved after the root
+# re-exec so SUDO_USER is populated.
+SHELL_USER=""
+SETUP_WEBSSH_KEY=1
 
 INSTALL_DIR="/usr/local/bin"
 ENV_DIR="/etc/ongrid-edge"
@@ -77,6 +82,8 @@ Required (install):
   --server-http-addr=HOST[:PORT]   http endpoint, e.g. ongrid.example.com:8443
 
 Other:
+  --shell-user=USER                OS user WebSSH logs in as (default: SUDO_USER, else root)
+  --no-webssh-key                  skip installing the WebSSH authorized_keys entry
   --uninstall                      stop + remove ongrid-edge (keeps /var/log)
   -h, --help                       this help
 
@@ -92,6 +99,8 @@ for arg in "$@"; do
         --secret-key=*)        SECRET_KEY="${arg#*=}" ;;
         --server-edge-addr=*)  SERVER_EDGE_ADDR="${arg#*=}" ;;
         --server-http-addr=*)  SERVER_HTTP_ADDR="${arg#*=}" ;;
+        --shell-user=*)        SHELL_USER="${arg#*=}" ;;
+        --no-webssh-key)       SETUP_WEBSSH_KEY=0 ;;
         --uninstall)           UNINSTALL=1 ;;
         -h|--help)             usage; exit 0 ;;
         *) log_error "unknown arg: $arg"; usage; exit 2 ;;
@@ -105,11 +114,32 @@ if [[ $EUID -ne 0 ]]; then
     exec sudo -E bash "$0" "$@"
 fi
 
+# Resolve the WebSSH shell user now that we are root — SUDO_USER is set by the
+# sudo re-exec above. An explicit --shell-user always wins; otherwise fall back
+# to the human who ran the installer, then root.
+if [[ -z "$SHELL_USER" ]]; then
+    SHELL_USER="${SUDO_USER:-root}"
+fi
+
 # --- uninstall path ----------------------------------------------------------
 
 if [[ $UNINSTALL -eq 1 ]]; then
     log_info "stopping ongrid-edge"
     systemctl disable --now ongrid-edge 2>/dev/null || true
+    # Remove the WebSSH authorized_keys entry for the configured shell user
+    # (best-effort; read the user from the env file before we delete it).
+    if [[ -f "$ENV_FILE" ]]; then
+        UNINST_USER=$(grep -E '^ONGRID_EDGE_SHELL_USER=' "$ENV_FILE" 2>/dev/null | cut -d= -f2- || true)
+        if [[ -n "${UNINST_USER:-}" ]]; then
+            UNINST_HOME=$(getent passwd "$UNINST_USER" 2>/dev/null | cut -d: -f6 || true)
+            UNINST_AK="${UNINST_HOME:-}/.ssh/authorized_keys"
+            if [[ -n "${UNINST_HOME:-}" && -f "$UNINST_AK" ]] && grep -qF 'ongrid-webssh' "$UNINST_AK" 2>/dev/null; then
+                grep -vF 'ongrid-webssh' "$UNINST_AK" > "${UNINST_AK}.tmp" && mv "${UNINST_AK}.tmp" "$UNINST_AK"
+                chmod 600 "$UNINST_AK"; chown "$UNINST_USER" "$UNINST_AK" 2>/dev/null || true
+                log_info "removed WebSSH key from ${UNINST_USER}'s authorized_keys"
+            fi
+        fi
+    fi
     rm -f "$SERVICE_FILE" "$INSTALL_DIR/ongrid-edge"
     rm -rf "$ENV_DIR"
     systemctl daemon-reload || true
@@ -255,9 +285,79 @@ cat > "$ENV_FILE" <<EOF
 ONGRID_EDGE_CLOUD_ADDR=${SERVER_EDGE_ADDR}
 ONGRID_EDGE_ACCESS_KEY=${ACCESS_KEY}
 ONGRID_EDGE_SECRET_KEY=${SECRET_KEY}
+ONGRID_EDGE_SHELL_USER=${SHELL_USER}
 EOF
 chmod 640 "$ENV_FILE"
 chown "root:${SERVICE_GROUP}" "$ENV_FILE"
+
+# --- WebSSH keyless login ----------------------------------------------------
+#
+# The manager runs the SSH client and authenticates to this host's sshd with a
+# key it owns. We fetch the manager's public key and drop it into the target
+# user's ~/.ssh/authorized_keys so WebSSH logs in without a password. The line
+# is tagged "ongrid-webssh" and pinned to from="127.0.0.1,::1" by the manager
+# (WebSSH always reaches sshd via the local edge), so it cannot be used from
+# another machine. Best-effort: any failure here only disables the terminal,
+# surfaced below — the agent still installs and connects.
+
+setup_webssh_key() {
+    local user="$1"
+    local grp home ssh_dir ak key
+    if ! grp=$(id -gn "$user" 2>/dev/null); then
+        log_warn "shell user '${user}' does not exist; skipping WebSSH key setup"
+        return 0
+    fi
+    home=$(getent passwd "$user" | cut -d: -f6)
+    if [[ -z "$home" || ! -d "$home" ]]; then
+        log_warn "shell user '${user}' has no home directory; skipping WebSSH key setup"
+        return 0
+    fi
+    key=$(curl -fLk --retry 3 --retry-delay 2 "https://${SERVER_HTTP_ADDR}/api/v1/edge/webssh-authorized-key" 2>/dev/null || true)
+    if [[ -z "$key" ]]; then
+        log_warn "could not fetch WebSSH public key from https://${SERVER_HTTP_ADDR}/api/v1/edge/webssh-authorized-key"
+        log_warn "  the browser terminal (WebSSH) will not work until the key is installed"
+        return 0
+    fi
+    ssh_dir="${home}/.ssh"
+    ak="${ssh_dir}/authorized_keys"
+    install -d -m 700 -o "$user" -g "$grp" "$ssh_dir"
+    [[ -f "$ak" ]] || : > "$ak"
+    # Idempotent: drop any prior ongrid-webssh line, then append the fresh one.
+    if grep -qF 'ongrid-webssh' "$ak" 2>/dev/null; then
+        grep -vF 'ongrid-webssh' "$ak" > "${ak}.tmp" && mv "${ak}.tmp" "$ak"
+    fi
+    printf '%s\n' "$key" >> "$ak"
+    chmod 600 "$ak"
+    chown "${user}:${grp}" "$ak"
+    log_ok "WebSSH keyless login configured for user '${user}'"
+}
+
+check_sshd_for_webssh() {
+    local user="$1" eff prl
+    if ! command -v sshd >/dev/null 2>&1; then
+        log_warn "sshd not found — WebSSH needs an SSH daemon listening on this host (127.0.0.1:22)"
+        return 0
+    fi
+    eff=$(sshd -T 2>/dev/null || true)
+    [[ -z "$eff" ]] && return 0
+    if ! printf '%s\n' "$eff" | grep -qi '^pubkeyauthentication yes'; then
+        log_warn "sshd: PubkeyAuthentication is not 'yes' — WebSSH keyless login may fail"
+    fi
+    if [[ "$user" == "root" ]]; then
+        prl=$(printf '%s\n' "$eff" | grep -i '^permitrootlogin' | awk '{print $2}')
+        case "$prl" in
+            yes|prohibit-password|without-password) : ;;
+            *) log_warn "sshd: PermitRootLogin=${prl:-unknown} may reject root key login — consider 'prohibit-password'" ;;
+        esac
+    fi
+}
+
+if [[ $SETUP_WEBSSH_KEY -eq 1 ]]; then
+    setup_webssh_key "$SHELL_USER"
+    check_sshd_for_webssh "$SHELL_USER"
+else
+    log_info "skipping WebSSH key setup (--no-webssh-key)"
+fi
 
 # --- systemd unit ------------------------------------------------------------
 

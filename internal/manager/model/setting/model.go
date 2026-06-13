@@ -41,6 +41,16 @@ const (
 	CategoryLoki      = "loki"      // external Loki / VictoriaLogs URL + auth
 	CategoryTempo     = "tempo"     // external Tempo OTLP HTTP endpoint + auth
 	CategoryWebSearch = "websearch" // built-in web_search skill: Tavily key + future provider knobs
+	CategoryWebSSH    = "webssh"    // WebSSH keyless login: manager-held SSH private key
+)
+
+// Well-known keys under CategoryWebSSH.
+const (
+	// KeyWebSSHPrivateKey holds the manager's PEM-encoded (PKCS#8) ed25519
+	// private key, generated on first boot. Sensitive. The matching public
+	// key is handed to install.sh as an authorized_keys line so the manager
+	// can SSH into edge hosts without a password.
+	KeyWebSSHPrivateKey = "private_key"
 )
 
 // (CategoryGit + KeyGitGitHubToken removed HTTPS git
